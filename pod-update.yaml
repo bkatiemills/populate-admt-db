@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admt-update
+  labels:
+    tier: admt-api
+spec:
+  volumes:
+    - name: bulk
+      persistentVolumeClaim:
+        claimName: argovis-bulk
+    - name: logs
+      persistentVolumeClaim:
+        claimName: logs
+  containers:
+  - name: admt-rebuild
+    imagePullPolicy: Always
+    image: argovis/admtupdates:update
+    volumeMounts:
+      - mountPath: "/bulk"
+        name: bulk
+      - mountPath: "/logs"
+        name: logs
+    resources:
+      requests:
+        memory: "0Gi"
+        cpu: "0m"
+      limits:
+        memory: 1000Mi
+        cpu: 500m
+  restartPolicy: Never
+

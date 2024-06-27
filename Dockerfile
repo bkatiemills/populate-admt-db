@@ -19,7 +19,12 @@ COPY devfiles/R1901727_358.nc /bulk/ifremer/aoml/1901727/profiles/R1901727_358.n
 COPY devfiles/BD5903629_098.nc /bulk/ifremer/csiro/5903629/profiles/BD5903629_098.nc
 COPY devfiles/BD5903629_099.nc /bulk/ifremer/csiro/5903629/profiles/BD5903629_099.nc
 COPY load_all.sh /app/load_all.sh
+COPY load_update.sh /app/load_update.sh
 
 FROM base as rebuild
 COPY load_all.sh /app/load_all.sh
 CMD ["source" "/app/load_all.sh"]
+
+FROM base as update
+COPY load_update.sh /app/load_update.sh
+CMD ["source" "/app/load_update.sh"]
