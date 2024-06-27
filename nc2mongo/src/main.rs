@@ -4,10 +4,11 @@ use tokio;
 use std::error::Error;
 use std::env;
 use mongodb::bson::{doc};
-use mongodb::{Client, options::{ClientOptions, ResolverConfig}};
+use mongodb::{Client, options::{ClientOptions, ResolverConfig, DeleteOptions}};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use futures::StreamExt;
 
 // helper functions ///////////////////////////////////////////
 
@@ -125,6 +126,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         PI_NAME: Vec<String>,
         DATA_CENTRE: String,
         PLATFORM_TYPE: String,
+        PLATFORM_NUMBER: String,
         FLOAT_SERIAL_NO: String,
         FIRMWARE_VERSION: String,
         WMO_INST_TYPE: String,
@@ -159,8 +161,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut file_names: Vec<String> = Vec::new();
     file_names.push(data_directory.clone());
     
-    let mut meta_docs: Vec<MetaSchema> = Vec::new();
-
     for file_name in file_names {
         println!("Processing file: {}", file_name);
         let id = file_name
@@ -168,7 +168,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .next()
             .and_then(|name| name.strip_suffix(".nc"))
             .unwrap_or("");
-        let file = netcdf::open(&file_name)?;
+        let file = match netcdf::open(&file_name) {
+            Ok(file) => file,
+            Err(e) => {
+                let delete_id = file_name
+                    .rsplit('/')
+                    .next()
+                    .and_then(|name| name.strip_suffix(".nc"))
+                    .unwrap_or("");  
+                let filter = doc! { "_id": delete_id };
+                let options = DeleteOptions::builder().build();
+                argo.delete_one(filter, options).await?;
+                continue;
+            }
+        };
         let pindex = 0; // just use the first profile for now
         let STRING1: usize = 1;
         let STRING2: usize = 2;
@@ -408,6 +421,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             PI_NAME: split_string(PI_NAME, ','),
             DATA_CENTRE: DATA_CENTRE,
             PLATFORM_TYPE: PLATFORM_TYPE,
+            PLATFORM_NUMBER: PLATFORM_NUMBER.clone(),
             FLOAT_SERIAL_NO: FLOAT_SERIAL_NO,
             FIRMWARE_VERSION: FIRMWARE_VERSION,
             WMO_INST_TYPE: WMO_INST_TYPE,
@@ -415,31 +429,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
         // check if this metadata object already exists in the database
+        let filter = doc! {
+            "PLATFORM_NUMBER": meta_object.PLATFORM_NUMBER.clone(),
+        };
+        let mut cursor = argo_meta.find(filter, None).await?;
+
         let mut meta_id = String::new();
-        for meta_doc in meta_docs.iter() {
-            if meta_doc.DATA_TYPE == meta_object.DATA_TYPE
-                && meta_doc.FORMAT_VERSION == meta_object.FORMAT_VERSION
-                && meta_doc.HANDBOOK_VERSION == meta_object.HANDBOOK_VERSION
-                && meta_doc.REFERENCE_DATE_TIME == meta_object.REFERENCE_DATE_TIME
-                && meta_doc.PROJECT_NAME == meta_object.PROJECT_NAME
-                && meta_doc.PI_NAME == meta_object.PI_NAME
-                && meta_doc.DATA_CENTRE == meta_object.DATA_CENTRE
-                && meta_doc.PLATFORM_TYPE == meta_object.PLATFORM_TYPE
-                && meta_doc.FLOAT_SERIAL_NO == meta_object.FLOAT_SERIAL_NO
-                && meta_doc.FIRMWARE_VERSION == meta_object.FIRMWARE_VERSION
-                && meta_doc.WMO_INST_TYPE == meta_object.WMO_INST_TYPE
-                && meta_doc.POSITIONING_SYSTEM == meta_object.POSITIONING_SYSTEM
-            {
-                meta_id = meta_doc._id.clone();
-                break;
+        let mut metadocs = 0;
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(document) => {
+                    if document.DATA_TYPE == meta_object.DATA_TYPE
+                        && document.FORMAT_VERSION == meta_object.FORMAT_VERSION
+                        && document.HANDBOOK_VERSION == meta_object.HANDBOOK_VERSION
+                        && document.REFERENCE_DATE_TIME == meta_object.REFERENCE_DATE_TIME
+                        && document.PROJECT_NAME == meta_object.PROJECT_NAME
+                        && document.PI_NAME == meta_object.PI_NAME
+                        && document.DATA_CENTRE == meta_object.DATA_CENTRE
+                        && document.PLATFORM_TYPE == meta_object.PLATFORM_TYPE
+                        && document.PLATFORM_NUMBER == meta_object.PLATFORM_NUMBER
+                        && document.FLOAT_SERIAL_NO == meta_object.FLOAT_SERIAL_NO
+                        && document.FIRMWARE_VERSION == meta_object.FIRMWARE_VERSION
+                        && document.WMO_INST_TYPE == meta_object.WMO_INST_TYPE
+                        && document.POSITIONING_SYSTEM == meta_object.POSITIONING_SYSTEM
+                    {
+                        meta_id = document._id.clone();
+                    } else {
+                        metadocs += 1;
+                    }
+                }
+                Err(e) => return Err(e.into()),
             }
         }
 
         if meta_id.is_empty() {
             // we found a new metadata doc
-            let new_id = format!("{}_m{}", PLATFORM_NUMBER, meta_docs.len());
+            let new_id = format!("{}_m{}", PLATFORM_NUMBER, metadocs);
             meta_object._id = new_id.clone();
-            meta_docs.push(meta_object.clone());
             argo_meta.insert_one(meta_object, None).await?;
             meta_id = new_id;
         }
@@ -472,7 +498,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             adjusted_level_qc: adjusted_level_qc,
         };
     
-        argo.insert_one(data_object, None).await?;
+        //argo.insert_one(data_object, None).await?;
+        let filter = doc! {
+            "_id": data_object._id.clone(),
+        };
+        let update = doc! {
+            "$set": bson::to_bson(&data_object)?,
+        };
+        let options = mongodb::options::UpdateOptions::builder().upsert(true).build();
+        argo.update_one(filter, update, options).await?;
     }
     
     Ok(())

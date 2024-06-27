@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admt-rebuild
+  labels:
+    tier: admt-api
+spec:
+  volumes:
+    - name: bulk
+      persistentVolumeClaim:
+        claimName: argovis-bulk
+  containers:
+  - name: admt-rebuild
+    imagePullPolicy: Always
+    image: argovis/admtupdates:rebuild
+    volumeMounts:
+      - mountPath: "/bulk"
+        name: bulk
+    resources:
+      requests:
+        memory: "0Gi"
+        cpu: "0m"
+      limits:
+        memory: 1000Mi
+        cpu: 500m
+  restartPolicy: Never
+
