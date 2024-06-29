@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: admt-sync
+spec:
+  schedule: "10 6 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          name: admt-update
+          labels:
+            tier: admt-api
+        spec:
+          volumes:
+            - name: bulk
+              persistentVolumeClaim:
+                claimName: argovis-bulk
+            - name: logs
+              persistentVolumeClaim:
+                claimName: logs
+          containers:
+            - name: admt-update
+              image: argovis/admtupdates:update
+              imagePullPolicy: Always
+              env:
+              - name: MONGODB_URI
+                value: mongodb://database-admt/argo
+              volumeMounts:
+                - mountPath: "/bulk"
+                  name: bulk
+                - mountPath: "/logs"
+                  name: logs
+              resources:
+                requests:
+                  memory: "2Gi"
+                  cpu: "1000m"
+                limits:
+                  memory: 2Gi
+                  cpu: 1000m
+          restartPolicy: Never
+          securityContext:
+            runAsUser: 1000660000
+            runAsGroup: 1000660000
+

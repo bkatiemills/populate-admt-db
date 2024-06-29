@@ -13,6 +13,9 @@ spec:
   - name: admt-rebuild
     imagePullPolicy: Always
     image: argovis/admtupdates:rebuild
+    env:
+    - name: MONGODB_URI
+      value: mongodb://database-admt/argo
     volumeMounts:
       - mountPath: "/bulk"
         name: bulk

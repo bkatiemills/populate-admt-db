@@ -175,7 +175,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .rsplit('/')
                     .next()
                     .and_then(|name| name.strip_suffix(".nc"))
-                    .unwrap_or("");  
+                    .unwrap_or("");
+                println!("Deleting profile: {}", delete_id); 
                 let filter = doc! { "_id": delete_id };
                 let options = DeleteOptions::builder().build();
                 argo.delete_one(filter, options).await?;

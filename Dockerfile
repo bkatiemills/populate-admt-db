@@ -5,6 +5,7 @@ RUN apt-get update -y ; apt-get install -y nano netcdf-bin libhdf5-serial-dev li
 COPY nc2mongo /app
 WORKDIR /app
 RUN cargo build --release
+RUN chown -R 1000660000 /app
 
 FROM base as dev
 # mockup for development
@@ -23,8 +24,8 @@ COPY load_update.sh /app/load_update.sh
 
 FROM base as rebuild
 COPY load_all.sh /app/load_all.sh
-CMD ["source" "/app/load_all.sh"]
+CMD ["bash", "/app/load_all.sh"]
 
 FROM base as update
 COPY load_update.sh /app/load_update.sh
-CMD ["source" "/app/load_update.sh"]
+CMD ["bash", "/app/load_update.sh"]
