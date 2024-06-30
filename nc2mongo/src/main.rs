@@ -70,7 +70,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
           .await?;
     let client = Client::with_options(options)?; 
     let argo = client.database("argo").collection::<DataSchema>("argo");
-    let argo_meta = client.database("argo").collection::<MetaSchema>("argoMeta");
 
     // structs to describe documents //////////////////////////////
 
@@ -93,7 +92,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     struct DataSchema {
         _id: String,
         geolocation: GeoJSONPoint,
-        metadata: Vec<String>,
         CYCLE_NUMBER: i32,
         DIRECTION: String,
         DATA_STATE_INDICATOR: String,
@@ -113,11 +111,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         data_info: Option<HashMap<String, DataInfo>>,
         level_qc: Option<HashMap<String, Vec<String>>>,
         adjusted_level_qc: Option<HashMap<String, Vec<String>>>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct MetaSchema {
-        _id: String,
         DATA_TYPE: String,
         FORMAT_VERSION: String,
         HANDBOOK_VERSION: String,
@@ -205,7 +198,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let REFERENCE_DATE_TIME: String = unpack_string("REFERENCE_DATE_TIME", DATE_TIME, [..14].into(), &file);
         let DATE_CREATION: String = unpack_string("DATE_CREATION", DATE_TIME, [..14].into(), &file);
         let DATE_UPDATE: String = unpack_string("DATE_UPDATE", DATE_TIME, [..14].into(), &file);
-        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [..1, ..8].into(), &file); // encoded as metadata _id
+        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [..1, ..8].into(), &file);
         let PROJECT_NAME: String = unpack_string("PROJECT_NAME", STRING64, [..1, ..64].into(), &file);
         let PI_NAME: String = unpack_string("PI_NAME", STRING64, [..1, ..64].into(), &file);
         let namesize: usize = file.variable("STATION_PARAMETERS").unwrap().dimensions()[2].len();
@@ -412,72 +405,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         
         // construct the structs for this file ///////////////////////////////
     
-        let mut meta_object = MetaSchema {
-            _id: PLATFORM_NUMBER.clone(),
-            DATA_TYPE: DATA_TYPE,
-            FORMAT_VERSION: FORMAT_VERSION,
-            HANDBOOK_VERSION: HANDBOOK_VERSION,
-            REFERENCE_DATE_TIME: REFERENCE_DATE_TIME,
-            PROJECT_NAME: PROJECT_NAME,
-            PI_NAME: split_string(PI_NAME, ','),
-            DATA_CENTRE: DATA_CENTRE,
-            PLATFORM_TYPE: PLATFORM_TYPE,
-            PLATFORM_NUMBER: PLATFORM_NUMBER.clone(),
-            FLOAT_SERIAL_NO: FLOAT_SERIAL_NO,
-            FIRMWARE_VERSION: FIRMWARE_VERSION,
-            WMO_INST_TYPE: WMO_INST_TYPE,
-            POSITIONING_SYSTEM: POSITIONING_SYSTEM,
-        };
-
-        // check if this metadata object already exists in the database
-        let filter = doc! {
-            "PLATFORM_NUMBER": meta_object.PLATFORM_NUMBER.clone(),
-        };
-        let mut cursor = argo_meta.find(filter, None).await?;
-
-        let mut meta_id = String::new();
-        let mut metadocs = 0;
-        while let Some(result) = cursor.next().await {
-            match result {
-                Ok(document) => {
-                    if document.DATA_TYPE == meta_object.DATA_TYPE
-                        && document.FORMAT_VERSION == meta_object.FORMAT_VERSION
-                        && document.HANDBOOK_VERSION == meta_object.HANDBOOK_VERSION
-                        && document.REFERENCE_DATE_TIME == meta_object.REFERENCE_DATE_TIME
-                        && document.PROJECT_NAME == meta_object.PROJECT_NAME
-                        && document.PI_NAME == meta_object.PI_NAME
-                        && document.DATA_CENTRE == meta_object.DATA_CENTRE
-                        && document.PLATFORM_TYPE == meta_object.PLATFORM_TYPE
-                        && document.PLATFORM_NUMBER == meta_object.PLATFORM_NUMBER
-                        && document.FLOAT_SERIAL_NO == meta_object.FLOAT_SERIAL_NO
-                        && document.FIRMWARE_VERSION == meta_object.FIRMWARE_VERSION
-                        && document.WMO_INST_TYPE == meta_object.WMO_INST_TYPE
-                        && document.POSITIONING_SYSTEM == meta_object.POSITIONING_SYSTEM
-                    {
-                        meta_id = document._id.clone();
-                    } else {
-                        metadocs += 1;
-                    }
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        if meta_id.is_empty() {
-            // we found a new metadata doc
-            let new_id = format!("{}_m{}", PLATFORM_NUMBER, metadocs);
-            meta_object._id = new_id.clone();
-            argo_meta.insert_one(meta_object, None).await?;
-            meta_id = new_id;
-        }
-
         let data_object = DataSchema {
             _id: id.to_string(),
             geolocation: GeoJSONPoint {
                 location_type: "Point".to_string(),
                 coordinates: [LONGITUDE, LATITUDE],
             },
-            metadata: vec![meta_id.clone()],
             CYCLE_NUMBER: CYCLE_NUMBER,
             DIRECTION: DIRECTION,
             DATA_STATE_INDICATOR: DATA_STATE_INDICATOR,
@@ -497,6 +430,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             data_info: data_info,
             level_qc: level_qc,
             adjusted_level_qc: adjusted_level_qc,
+            DATA_TYPE: DATA_TYPE,
+            FORMAT_VERSION: FORMAT_VERSION,
+            HANDBOOK_VERSION: HANDBOOK_VERSION,
+            REFERENCE_DATE_TIME: REFERENCE_DATE_TIME,
+            PROJECT_NAME: PROJECT_NAME,
+            PI_NAME: split_string(PI_NAME, ','),
+            DATA_CENTRE: DATA_CENTRE,
+            PLATFORM_TYPE: PLATFORM_TYPE,
+            PLATFORM_NUMBER: PLATFORM_NUMBER,
+            FLOAT_SERIAL_NO: FLOAT_SERIAL_NO,
+            FIRMWARE_VERSION: FIRMWARE_VERSION,
+            WMO_INST_TYPE: WMO_INST_TYPE,
+            POSITIONING_SYSTEM: POSITIONING_SYSTEM,
         };
     
         //argo.insert_one(data_object, None).await?;
