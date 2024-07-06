@@ -1,13 +1,31 @@
 use argo_data::VariableExt;
 use std::env;
+use mongodb::bson::{doc};
+use mongodb::{Client, options::{ClientOptions, ResolverConfig, DeleteOptions, UpdateOptions}};
+use tokio;
 
-pub fn main() -> argo_data::error::Result<()> {
+#[tokio::main]
+pub async fn main() -> argo_data::error::Result<()> {
+    // mongodb setup ///////////////////////////////////////////
+    // Load the MongoDB connection string from an environment variable:
+    let client_uri =
+       env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment var!"); 
+
+    // A Client is needed to connect to MongoDB:
+    // An extra line of code to work around a DNS issue on Windows:
+    let options =
+       ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
+          .await?;
+    let client = Client::with_options(options)?; 
+    let argo = client.database("argo").collection::<mongodb::bson::Document>("argo");
+
+    // get command line parameters
     let args: Vec<String> = env::args().collect();
     let file_path = &args[1];
-
     let file = netcdf::open(file_path)?;
 
-    let map = file
+    // chew up that data
+    let mut map = file
         .variables()
         .map(|variable| {
             variable
@@ -17,7 +35,15 @@ pub fn main() -> argo_data::error::Result<()> {
         .collect::<Result<Vec<_>, _>>()
         .map(serde_json::Map::from_iter)?;
 
-    println!("{}", serde_json::to_string(&map)?);
+    // append custom parameters
+    map.insert("gdac_file".to_string(), serde_json::Value::from(file_path.clone().replace("/bulk/ifremer/", "ftp://ftp.ifremer.fr/ifremer/argo/dac/")));
+    let _id = file_path.split('/').last().unwrap_or("").trim_end_matches(".nc");
+    map.insert("_id".to_string(), serde_json::Value::from(_id.clone()));
+
+    let filter = mongodb::bson::doc! { "_id": _id };
+    let update = mongodb::bson::doc! { "$set": mongodb::bson::to_bson(&map)? };
+    let options = mongodb::options::UpdateOptions::builder().upsert(true).build();
+    argo.update_one(filter, update, options).await?;
 
     Ok(())
 }
