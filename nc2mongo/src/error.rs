@@ -4,6 +4,7 @@ pub enum Error {
     NoNetCDFDimensions,
     SerdeJson(serde_json::Error),
     Unknown(String),
+    Ndarray(ndarray::ShapeError),
 }
 
 impl std::fmt::Display for Error {
@@ -12,6 +13,7 @@ impl std::fmt::Display for Error {
             Self::NetCDF(err) => write!(f, "NetCDF Error: {err}"),
             Self::NoNetCDFDimensions => write!(f, "No NetCDF dimension found."),
             Self::SerdeJson(err) => write!(f, "Serde Error: {err}"),
+            Self::Ndarray(err) => write!(f, "ndarray Error: {err}"),
             Self::Unknown(msg) => write!(f, "Unknown error: {msg}"),
         }
     }
@@ -30,5 +32,11 @@ impl From<netcdf::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(value: serde_json::Error) -> Self {
         Self::SerdeJson(value)
+    }
+}
+
+impl From<ndarray::ShapeError> for Error {
+    fn from(value: ndarray::ShapeError) -> Self {
+        Self::Ndarray(value)
     }
 }

@@ -1,146 +1,73 @@
-use crate::error::{Error, Result};
+use netcdf::{Extent, Extents};
+
+use crate::error::Result;
+use crate::ext::ArrayBaseExt;
 
 pub trait VariableExt {
-    fn try_into_json(&self) -> Result<serde_json::Value>;
+    fn to_value(&self) -> Result<serde_json::Value>;
 }
 
 impl<'a> VariableExt for netcdf::Variable<'a> {
-    fn try_into_json(&self) -> Result<serde_json::Value> {
+    fn to_value(&self) -> Result<serde_json::Value> {
+        let dimensions = Extents::from(
+            self.dimensions()
+                .iter()
+                .map(|dim| Extent::from(..dim.len()))
+                .collect::<Vec<_>>(),
+        );
+
+        use netcdf::types::{BasicType::*, VariableType::*};
+        use std::string::String;
+
         match self.vartype() {
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Byte) => {
-                Ok(self.get_values::<i8, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Char) => {
-               
-                let dimension_sizes: Vec<_> = self
+            Basic(Ubyte) => self.get::<u8, _>(dimensions)?.to_value(),
+            Basic(Ushort) => self.get::<u16, _>(dimensions)?.to_value(),
+            Basic(Uint) => self.get::<u32, _>(dimensions)?.to_value(),
+            Basic(Uint64) => self.get::<u64, _>(dimensions)?.to_value(),
+            Basic(Byte) => self.get::<i8, _>(dimensions)?.to_value(),
+            Basic(Short) => self.get::<i16, _>(dimensions)?.to_value(),
+            Basic(Int) => self.get::<i32, _>(dimensions)?.to_value(),
+            Basic(Int64) => self.get::<i64, _>(dimensions)?.to_value(),
+            Basic(Float) => self.get::<f32, _>(dimensions)?.to_value(),
+            Basic(Double) => self.get::<f64, _>(dimensions)?.to_value(),
+            Basic(Char) => {
+                let shape = self
                     .dimensions()
                     .iter()
-                    .map(|d| d.len())
-                    .collect();
-                
-                let final_dimension = self
-                    .dimensions()
-                    .iter()
-                    .last()
-                    .ok_or(Error::NoNetCDFDimensions)?;
-
-                let var_len = final_dimension.len();
-
-                let mut buffer = vec![0u8; self.len()];
-
-                self.get_raw_values(&mut buffer, netcdf::Extents::All)
-                    .unwrap();
-
-                let mut strings = buffer
-                    .chunks(var_len)
-                    .map(|s| String::from_utf8(s.into()).unwrap())
+                    .map(|dim| dim.len())
                     .collect::<Vec<_>>();
 
-                for string in strings.iter_mut() {
-                    *string = string.trim().to_string();
-                }
-
-                let mut xx = Vec::new();
-                if dimension_sizes.len() > 2 {
-                    xx = strings
-                        .chunks(dimension_sizes[dimension_sizes.len() - 2])
-                        .map(|s| s.to_vec())
-                        .collect::<Vec<_>>();
-                }
-
-                let mut yy = Vec::new();
-                if dimension_sizes.len() > 3 {
-                    yy = xx
-                        .chunks(dimension_sizes[dimension_sizes.len() - 3])
-                        .map(|s| s.to_vec())
-                        .collect::<Vec<_>>();
-                }
-
-                if dimension_sizes.len() < 3 {
-                    if dimension_sizes.len() == 1 {
-                        if self.dimensions()[0].name() == "N_PROF"  {
-                            let chars: Vec<String> = strings[0].chars().map(|c| c.to_string()).collect();
-                            Ok(serde_json::Value::from(chars))
-                        } else { 
-                            Ok(serde_json::Value::from(strings[0].clone()))
-                        }
-                    } else if dimension_sizes.len() == 2 && self.dimensions()[0].name() == "N_PROF" && self.dimensions()[1].name() == "N_LEVELS"{
-                        let mut zz = Vec::new();
-                        for string in strings.iter_mut() {
-                            let chars: Vec<String> = string.chars().map(|c| c.to_string()).collect();
-                            zz.push(chars);
-                        }
-                        Ok(serde_json::Value::from(zz))
-                    } else {
-                        Ok(serde_json::Value::from(strings))
-                    }
-                } else if dimension_sizes.len() == 3 {
-                    Ok(serde_json::Value::from(xx))
-                } else {
-                    Ok(serde_json::Value::from(yy))
-                }
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Ubyte) => {
-                Ok(self.get_values::<u8, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Short) => {
-                Ok(self.get_values::<i16, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Ushort) => {
-                Ok(self.get_values::<u16, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Int) => {
-                Ok(self.get_values::<i32, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Uint) => {
-                Ok(self.get_values::<u32, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Int64) => {
-                Ok(self.get_values::<i64, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Uint64) => {
-                Ok(self.get_values::<u64, _>(netcdf::Extents::All)?.into())
-            }
-
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Float) => {
-                //Ok(self.get_values::<f32, _>(netcdf::Extents::All)?.into())
-                let values = self.get_values::<f32, _>(netcdf::Extents::All)?;
-
-                let dimension_sizes: Vec<_> = self
+                let span = self
                     .dimensions()
                     .iter()
-                    .map(|d| d.len())
-                    .collect();
+                    .map(netcdf::Dimension::len)
+                    .reduce(std::ops::Mul::mul)
+                    .unwrap_or(0);
 
-                let mut xx = Vec::new();
-                if dimension_sizes.len() == 2 {
-                    xx = values
-                        .chunks(dimension_sizes[dimension_sizes.len() - 1])
-                        .map(|s| s.to_vec())
-                        .collect::<Vec<_>>();
-                }
+                let mut buffer = vec![0u8; span];
 
-                if dimension_sizes.len() == 1 {
-                    Ok(values.into())
+                self.get_raw_values(&mut buffer, dimensions)?;
+
+                let dontsplit = vec!["STRING2", "STRING4", "STRING8", "STRING16", "STRING32", "STRING64", "STRING256", "DATE_TIME"];
+                if self.dimensions().len() == 1 && dontsplit.contains(&self.dimensions()[0].name().as_str()) {
+                    let y: String = buffer.iter().map(|&c| c as char).collect::<String>().trim().to_owned();
+                    Ok(serde_json::Value::from(y))
+                } else if  self.dimensions().len() == 1 {
+                    let y: Vec<String> = buffer.iter().map(|&c| (c as char).to_string()).collect();
+                    Ok(serde_json::Value::from(y))
+                } else if self.dimensions().len() == 2 {
+                    let y: Vec<String> = buffer.chunks(shape[shape.len() - 1]).map(|chunk| chunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect();
+                    Ok(serde_json::Value::from(y))
+                } else if self.dimensions().len() == 3 {
+                    let y: Vec<Vec<String>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|chunk| chunk.chunks(shape[shape.len() - 1]).map(|subchunk| subchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect();
+                    Ok(serde_json::Value::from(y))
                 } else {
-                    Ok(serde_json::Value::from(xx))
-                } 
+                    let y: Vec<Vec<Vec<String>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2] * shape[shape.len() - 3]).map(|chunk| chunk.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect();
+                    Ok(serde_json::Value::from(y))
+                }
             }
 
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Double) => {
-                Ok(self.get_values::<f64, _>(netcdf::Extents::All)?.into())
-            }
-
-            // Only basic types supported
-            _ => todo!(),
+            _ => Ok(serde_json::Value::Null),
         }
     }
 }

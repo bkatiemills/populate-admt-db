@@ -11,7 +11,7 @@ pub fn main() -> argo_data::error::Result<()> {
         .variables()
         .map(|variable| {
             variable
-                .try_into_json()
+                .to_value()
                 .map(|json_var| (variable.name(), json_var))
         })
         .collect::<Result<Vec<_>, _>>()

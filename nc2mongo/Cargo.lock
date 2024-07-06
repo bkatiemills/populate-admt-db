@@ -15,6 +15,7 @@ dependencies = [
 name = "argo-data"
 version = "0.1.0"
 dependencies = [
+ "ndarray",
  "netcdf",
  "serde",
  "serde_json",
