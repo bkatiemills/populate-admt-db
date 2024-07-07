@@ -17,7 +17,6 @@ impl<'a> VariableExt for netcdf::Variable<'a> {
         );
 
         use netcdf::types::{BasicType::*, VariableType::*};
-        use std::string::String;
 
         match self.vartype() {
             Basic(Ubyte) => self.get::<u8, _>(dimensions)?.to_value(),
@@ -31,12 +30,6 @@ impl<'a> VariableExt for netcdf::Variable<'a> {
             Basic(Float) => self.get::<f32, _>(dimensions)?.to_value(),
             Basic(Double) => self.get::<f64, _>(dimensions)?.to_value(),
             Basic(Char) => {
-                let shape = self
-                    .dimensions()
-                    .iter()
-                    .map(|dim| dim.len())
-                    .collect::<Vec<_>>();
-
                 let span = self
                     .dimensions()
                     .iter()
@@ -48,33 +41,37 @@ impl<'a> VariableExt for netcdf::Variable<'a> {
 
                 self.get_raw_values(&mut buffer, dimensions)?;
 
-                let dontsplit = vec!["STRING2", "STRING4", "STRING8", "STRING16", "STRING32", "STRING64", "STRING256", "DATE_TIME"];
-                if self.dimensions().len() == 1 && dontsplit.contains(&self.dimensions()[0].name().as_str()) {
-                    let y: String = buffer.iter().map(|&c| c as char).collect::<String>().trim().to_owned();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 1 {
-                    let y: Vec<String> = buffer.iter().map(|&c| (c as char).to_string()).collect();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 2 && dontsplit.contains(&self.dimensions()[1].name().as_str()) {
-                    let y: Vec<String> = buffer.chunks(shape[shape.len() - 1]).map(|chunk| chunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 2 {
-                    let y: Vec<Vec<String>> = buffer.chunks(shape[shape.len() - 1]).map(|chunk| chunk.chunks(1).map(|subchunk| subchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect() ).collect();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 3 && dontsplit.contains(&self.dimensions()[2].name().as_str()) {
-                    let y: Vec<Vec<String>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|chunk| chunk.chunks(shape[shape.len() - 1]).map(|subchunk| subchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 3{
-                    // not seen in data, here for completion's sake
-                    let y: Vec<Vec<Vec<String>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|chunk| chunk.chunks(shape[shape.len() - 1]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect();
-                    Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 4 && dontsplit.contains(&self.dimensions()[3].name().as_str()) {
-                    let y: Vec<Vec<Vec<String>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2] * shape[shape.len() - 3]).map(|chunk| chunk.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect();
-                    Ok(serde_json::Value::from(y))
-                } else {
-                    // not seen in data, here for completion's sake
-                    let y: Vec<Vec<Vec<Vec<String>>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2] * shape[shape.len() - 3]).map(|chunk| chunk.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.chunks(shape[shape.len() - 1]).map(|subsubsubchunk| subsubsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect()).collect();
-                    Ok(serde_json::Value::from(y))
+                match self.dimensions() {
+                    [] => Ok(serde_json::Value::Array(vec![])),
+                    [rest @ .., tail] => if tail.name().starts_with("STRING") || tail.name() == "DATE_TIME" {
+                        let raw_values = buffer
+                            .chunks(tail.len())
+                            .map(|data| {
+                                serde_json::Value::String(unsafe {
+                                    std::string::String::from_utf8_unchecked(data.to_vec())
+                                        .trim()
+                                        .to_string()
+                                })
+                            })
+                            .collect::<Vec<_>>();
+
+                        ndarray::Array::from_shape_vec(
+                            rest.iter().map(|dim| dim.len()).collect::<Vec<_>>(),
+                            raw_values,
+                        )
+                    } else {
+                        ndarray::Array::from_shape_vec(
+                            self.dimensions()
+                                .iter()
+                                .map(|dim| dim.len())
+                                .collect::<Vec<_>>(),
+                            buffer
+                                .iter()
+                                .map(|c| serde_json::Value::String((*c as char).to_string()))
+                                .collect(),
+                        )
+                    }?
+                    .to_value(),
                 }
             }
 
