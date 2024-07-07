@@ -52,17 +52,28 @@ impl<'a> VariableExt for netcdf::Variable<'a> {
                 if self.dimensions().len() == 1 && dontsplit.contains(&self.dimensions()[0].name().as_str()) {
                     let y: String = buffer.iter().map(|&c| c as char).collect::<String>().trim().to_owned();
                     Ok(serde_json::Value::from(y))
-                } else if  self.dimensions().len() == 1 {
+                } else if self.dimensions().len() == 1 {
                     let y: Vec<String> = buffer.iter().map(|&c| (c as char).to_string()).collect();
                     Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 2 {
+                } else if self.dimensions().len() == 2 && dontsplit.contains(&self.dimensions()[1].name().as_str()) {
                     let y: Vec<String> = buffer.chunks(shape[shape.len() - 1]).map(|chunk| chunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect();
                     Ok(serde_json::Value::from(y))
-                } else if self.dimensions().len() == 3 {
+                } else if self.dimensions().len() == 2 {
+                    let y: Vec<Vec<String>> = buffer.chunks(shape[shape.len() - 1]).map(|chunk| chunk.chunks(1).map(|subchunk| subchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect() ).collect();
+                    Ok(serde_json::Value::from(y))
+                } else if self.dimensions().len() == 3 && dontsplit.contains(&self.dimensions()[2].name().as_str()) {
                     let y: Vec<Vec<String>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|chunk| chunk.chunks(shape[shape.len() - 1]).map(|subchunk| subchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect();
                     Ok(serde_json::Value::from(y))
-                } else {
+                } else if self.dimensions().len() == 3{
+                    // not seen in data, here for completion's sake
+                    let y: Vec<Vec<Vec<String>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|chunk| chunk.chunks(shape[shape.len() - 1]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect();
+                    Ok(serde_json::Value::from(y))
+                } else if self.dimensions().len() == 4 && dontsplit.contains(&self.dimensions()[3].name().as_str()) {
                     let y: Vec<Vec<Vec<String>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2] * shape[shape.len() - 3]).map(|chunk| chunk.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect();
+                    Ok(serde_json::Value::from(y))
+                } else {
+                    // not seen in data, here for completion's sake
+                    let y: Vec<Vec<Vec<Vec<String>>>> = buffer.chunks(shape[shape.len() - 1] * shape[shape.len() - 2] * shape[shape.len() - 3]).map(|chunk| chunk.chunks(shape[shape.len() - 1] * shape[shape.len() - 2]).map(|subchunk| subchunk.chunks(shape[shape.len() - 1]).map(|subsubchunk| subsubchunk.chunks(shape[shape.len() - 1]).map(|subsubsubchunk| subsubsubchunk.iter().map(|&c| c as char).collect::<String>().trim().to_owned()).collect()).collect()).collect()).collect();
                     Ok(serde_json::Value::from(y))
                 }
             }
