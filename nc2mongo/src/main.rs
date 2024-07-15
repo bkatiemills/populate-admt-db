@@ -4,11 +4,9 @@ use tokio;
 use std::error::Error;
 use std::env;
 use mongodb::bson::{doc};
-use mongodb::{Client, options::{ClientOptions, ResolverConfig, DeleteOptions}};
+use mongodb::{Client, options::{ClientOptions, ResolverConfig}};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use futures::StreamExt;
 
 // helper functions ///////////////////////////////////////////
 
@@ -55,8 +53,8 @@ fn split_string(input: String, separator: char) -> Vec<String> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     
-    // Read the command line argument as data_directory
-    let data_directory = std::env::args().nth(1).expect("Missing data directory argument");
+    // Read the command line argument as file name of interest
+    let filename = std::env::args().nth(1).expect("Missing data directory argument");
 
     // mongodb setup ///////////////////////////////////////////
     // Load the MongoDB connection string from an environment variable:
@@ -124,58 +122,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         FIRMWARE_VERSION: String,
         WMO_INST_TYPE: String,
         POSITIONING_SYSTEM: String,
+        source_file: String,
     }
 
-    // data unpacking /////////////////////////////////////////////
+    // construct link to upstream netcdf file
+    let parts: Vec<&str> = filename.split("ifremer/").collect();
+    let source_file = format!("ftp://ftp.ifremer.fr/ifremer/argo/dac/{}", parts.get(1).unwrap());
+    println!("{}", source_file);
 
-    // // get a list of all the files in the data directory
-    // let mut file_names: Vec<String> = Vec::new();
-    // if let Ok(entries) = fs::read_dir(data_directory.clone()) {
-    //     for entry in entries {
-    //         if let Ok(entry) = entry {
-    //             if let Some(file_name) = entry.file_name().to_str() {
-    //                 let profile_path = format!("{}/{}/profiles", data_directory, file_name);
-    //                 if let Ok(profile_entries) = fs::read_dir(profile_path.clone()) {
-    //                     for profile_entry in profile_entries {
-    //                         if let Ok(profile_entry) = profile_entry {
-    //                             if let Some(profile_file_name) = profile_entry.file_name().to_str() {
-    //                                 let file_path = format!("{}/{}/profiles/{}", data_directory, file_name, profile_file_name);
-    //                                 file_names.push(file_path);
-    //                             }
-    //                         }
-    //                     }
-    //                 }   
-    //             }
-    //         }
-    //     }
-    // }
+    // remove previous content from this file
+    argo.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
 
-    // use 'data_directory' as the file name for now
-    let mut file_names: Vec<String> = Vec::new();
-    file_names.push(data_directory.clone());
-    
-    for file_name in file_names {
-        println!("Processing file: {}", file_name);
-        let id = file_name
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.strip_suffix(".nc"))
-            .unwrap_or("");
-        let file = match netcdf::open(&file_name) {
-            Ok(file) => file,
-            Err(e) => {
-                let delete_id = file_name
-                    .rsplit('/')
-                    .next()
-                    .and_then(|name| name.strip_suffix(".nc"))
-                    .unwrap_or("");
-                println!("Deleting profile: {}", delete_id); 
-                let filter = doc! { "_id": delete_id };
-                let options = DeleteOptions::builder().build();
-                argo.delete_one(filter, options).await?;
-                continue;
-            }
-        };
+    // open the file or inform the user the profile has been dropped
+    println!("Processing file: {}", filename.clone());
+    let id = filename
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".nc"))
+        .unwrap_or("");
+    let file = match netcdf::open(&filename.clone()) {
+        Ok(file) => file,
+        Err(_e) => {
+            eprintln!("Deleted contents of file: {}", source_file);
+            std::process::exit(1);
+        }
+    };
+
+    // loop over internal profiles
+    let N_PROF: usize = file.dimension("N_PROF").unwrap().len();
+    for pfl in 0..N_PROF {
+
+        // data unpacking /////////////////////////////////////////////
         let pindex = 0; // just use the first profile for now
         let STRING1: usize = 1;
         let STRING2: usize = 2;
@@ -186,11 +163,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let STRING64: usize = 64;
         let STRING256: usize = 256;
         let DATE_TIME: usize = 14;
-        let N_PROF: usize = file.dimension("N_PROF").unwrap().len();
+        
         let N_PARAM: usize = file.dimension("N_PARAM").unwrap().len();
         let N_LEVELS: usize = file.dimension("N_LEVELS").unwrap().len();
-        let N_CALIB: usize = file.dimension("N_CALIB").unwrap().len();
+        //let N_CALIB: usize = file.dimension("N_CALIB").unwrap().len();
         //let N_HISTORY: usize = file.dimension("N_HISTORY").unwrap().len();
+
+        println!("N_PROF: {}", N_PROF);
+        println!("N_LEVELS: {}", N_LEVELS);
     
         let DATA_TYPE: String = unpack_string("DATA_TYPE", STRING16, [..16].into(), &file);
         let FORMAT_VERSION: String = unpack_string("FORMAT_VERSION", STRING4, [..4].into(), &file);
@@ -198,9 +178,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let REFERENCE_DATE_TIME: String = unpack_string("REFERENCE_DATE_TIME", DATE_TIME, [..14].into(), &file);
         let DATE_CREATION: String = unpack_string("DATE_CREATION", DATE_TIME, [..14].into(), &file);
         let DATE_UPDATE: String = unpack_string("DATE_UPDATE", DATE_TIME, [..14].into(), &file);
-        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [..1, ..8].into(), &file);
-        let PROJECT_NAME: String = unpack_string("PROJECT_NAME", STRING64, [..1, ..64].into(), &file);
-        let PI_NAME: String = unpack_string("PI_NAME", STRING64, [..1, ..64].into(), &file);
+        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [pfl..(pfl+1), 0..8].into(), &file);
+        let PROJECT_NAME: String = unpack_string("PROJECT_NAME", STRING64, [pfl..(pfl+1), 0..64].into(), &file);
+        let PI_NAME: String = unpack_string("PI_NAME", STRING64, [pfl..(pfl+1), 0..64].into(), &file);
         let namesize: usize = file.variable("STATION_PARAMETERS").unwrap().dimensions()[2].len();
         let STATION_PARAMETERS: Vec<String> = unpack_string_array(
             "STATION_PARAMETERS",
@@ -216,21 +196,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 _ => panic!("Unsupported namesize: {}", namesize),
             },
             N_PARAM,
-            [..1, ..N_PARAM, ..namesize].into(),
+            [pfl..(pfl+1), 0..N_PARAM, 0..namesize].into(),
             &file,
         );
         let CYCLE_NUMBER: i32 = file.variable("CYCLE_NUMBER").map(|var| var.get_value([pindex]).unwrap_or(99999)).unwrap_or(99999);
-        let DIRECTION: String = unpack_string("DIRECTION", STRING1, [..1].into(), &file);
-        let DATA_CENTRE: String = unpack_string("DATA_CENTRE", STRING2, [..1, ..2].into(), &file);
-        let DC_REFERENCE: String = unpack_string("DC_REFERENCE", STRING32, [..1, ..32].into(), &file);
-        let DATA_STATE_INDICATOR: String = unpack_string("DATA_STATE_INDICATOR", STRING4, [..1, ..4].into(), &file);
-        let DATA_MODE: String = unpack_string("DATA_MODE", STRING1, [..1].into(), &file);
-        let PLATFORM_TYPE: String = unpack_string("PLATFORM_TYPE", STRING32, [..1, ..32].into(), &file);
-        let FLOAT_SERIAL_NO: String = unpack_string("FLOAT_SERIAL_NO", STRING32, [..1, ..32].into(), &file);
-        let FIRMWARE_VERSION: String = unpack_string("FIRMWARE_VERSION", STRING32, [..1, ..32].into(), &file);
-        let WMO_INST_TYPE: String = unpack_string("WMO_INST_TYPE", STRING4, [..1, ..4].into(), &file);
+        let DIRECTION: String = unpack_string("DIRECTION", STRING1, [pfl..(pfl+1)].into(), &file);
+        let DATA_CENTRE: String = unpack_string("DATA_CENTRE", STRING2, [pfl..(pfl+1), 0..2].into(), &file);
+        let DC_REFERENCE: String = unpack_string("DC_REFERENCE", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let DATA_STATE_INDICATOR: String = unpack_string("DATA_STATE_INDICATOR", STRING4, [pfl..(pfl+1), 0..4].into(), &file);
+        let DATA_MODE: String = unpack_string("DATA_MODE", STRING1, [pfl..(pfl+1)].into(), &file);
+        let PLATFORM_TYPE: String = unpack_string("PLATFORM_TYPE", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let FLOAT_SERIAL_NO: String = unpack_string("FLOAT_SERIAL_NO", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let FIRMWARE_VERSION: String = unpack_string("FIRMWARE_VERSION", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let WMO_INST_TYPE: String = unpack_string("WMO_INST_TYPE", STRING4, [pfl..(pfl+1), 0..4].into(), &file);
         let JULD: f64 = file.variable("JULD").map(|var| var.get_value([pindex]).unwrap_or(999999.0)).unwrap_or(999999.0);
-        let JULD_QC: String = unpack_string("JULD_QC", STRING1, [..1].into(), &file);
+        let JULD_QC: String = unpack_string("JULD_QC", STRING1, [pfl..(pfl+1)].into(), &file);
         let JULD_LOCATION: f64 = file.variable("JULD_LOCATION").map(|var| var.get_value([pindex]).unwrap_or(999999.0)).unwrap_or(999999.0);
         let mut LATITUDE: f64 = file.variable("LATITUDE").map(|var| var.get_value([pindex]).unwrap_or(99999.0)).unwrap_or(99999.0);
         let mut LONGITUDE: f64 = file.variable("LONGITUDE").map(|var| var.get_value([pindex]).unwrap_or(99999.0)).unwrap_or(99999.0);
@@ -247,13 +227,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             LONGITUDE
         };
-        let POSITION_QC: String = unpack_string("POSITION_QC", STRING1, [..1].into(), &file);
-        let POSITIONING_SYSTEM: String = unpack_string("POSITIONING_SYSTEM", STRING8, [..1, ..8].into(), &file);
-        let VERTICAL_SAMPLING_SCHEME: String = unpack_string("VERTICAL_SAMPLING_SCHEME", STRING256, [..1, ..256].into(), &file);
+        let POSITION_QC: String = unpack_string("POSITION_QC", STRING1, [pfl..(pfl+1)].into(), &file);
+        let POSITIONING_SYSTEM: String = unpack_string("POSITIONING_SYSTEM", STRING8, [pfl..(pfl+1), 0..8].into(), &file);
+        let VERTICAL_SAMPLING_SCHEME: String = unpack_string("VERTICAL_SAMPLING_SCHEME", STRING256, [pfl..(pfl+1), 0..256].into(), &file);
         let CONFIG_MISSION_NUMBER: i32 = file.variable("CONFIG_MISSION_NUMBER").map(|var| var.get_value([pindex]).unwrap_or(99999)).unwrap_or(99999);
 
-        let PARAMETER_DATA_MODE: Vec<String> = if let Some(variable) = file.variable("PARAMETER_DATA_MODE") {
-            unpack_string_array("PARAMETER_DATA_MODE", STRING1, N_PARAM, [..1, ..N_PARAM].into(), &file)
+        let PARAMETER_DATA_MODE: Vec<String> = if let Some(_variable) = file.variable("PARAMETER_DATA_MODE") {
+            unpack_string_array("PARAMETER_DATA_MODE", STRING1, N_PARAM, [pfl..(pfl+1), 0..N_PARAM].into(), &file)
         } else {
             vec![DATA_MODE.clone(); STATION_PARAMETERS.len()]
         };
@@ -268,7 +248,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 } else {
                     match file.variable(param) {
                         Some(variable) => {
-                            let data: Vec<f64> = variable.get_values([..1, ..N_LEVELS])?;
+                            let data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
                             Ok((param.clone(), data))
                         },
                         None => Ok((param.clone(), vec![])),
@@ -292,7 +272,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let adjusted_variable_name = format!("{}_ADJUSTED", param);
                         match file.variable(&adjusted_variable_name) {
                             Some(variable) => {
-                                let data: Vec<f64> = variable.get_values([..1, ..N_LEVELS])?;
+                                let data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
                                 Ok((param.clone(), data))
                             },
                             None => Ok((param.clone(), vec![])),
@@ -330,7 +310,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 let units = variable.attribute_value("units").unwrap()?;
                                 let long_name = variable.attribute_value("long_name").unwrap()?;
                                 let qc_variable_name = format!("PROFILE_{}_QC", param);
-                                let qc_value = unpack_string(&qc_variable_name, STRING1, [..1].into(), &file);
+                                let qc_value = unpack_string(&qc_variable_name, STRING1, [pfl..(pfl+1)].into(), &file);
                                 if let netcdf::AttributeValue::Str(u) = units {
                                     if let netcdf::AttributeValue::Str(l) = long_name {
                                         Ok((param.clone(), DataInfo {
@@ -366,7 +346,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok((param.clone(), vec![]))
                 } else {
                     let qc_variable_name = format!("{}_QC", param);
-                    let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [..1, ..N_LEVELS].into(), &file);
+                    let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
                     Ok((param.clone(), qc_vec))
                 }
             })
@@ -385,7 +365,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Ok((param.clone(), vec![]))
                     } else {
                         let qc_variable_name = format!("{}_ADJUSTED_QC", param);
-                        let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [..1, ..N_LEVELS].into(), &file);
+                        let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
                         Ok((param.clone(), qc_vec))
                     }
                 }
@@ -406,7 +386,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // construct the structs for this file ///////////////////////////////
     
         let data_object = DataSchema {
-            _id: id.to_string(),
+            _id: format!("{}_{}", id, pfl),
             geolocation: GeoJSONPoint {
                 location_type: "Point".to_string(),
                 coordinates: [LONGITUDE, LATITUDE],
@@ -443,7 +423,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             FIRMWARE_VERSION: FIRMWARE_VERSION,
             WMO_INST_TYPE: WMO_INST_TYPE,
             POSITIONING_SYSTEM: POSITIONING_SYSTEM,
+            source_file: source_file.clone(),
         };
+
+        //println!("{:?}", data_object);
     
         //argo.insert_one(data_object, None).await?;
         let filter = doc! {
