@@ -128,7 +128,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // construct link to upstream netcdf file
     let parts: Vec<&str> = filename.split("ifremer/").collect();
     let source_file = format!("ftp://ftp.ifremer.fr/ifremer/argo/dac/{}", parts.get(1).unwrap());
-    println!("{}", source_file);
 
     // remove previous content from this file
     argo.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
@@ -168,9 +167,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let N_LEVELS: usize = file.dimension("N_LEVELS").unwrap().len();
         //let N_CALIB: usize = file.dimension("N_CALIB").unwrap().len();
         //let N_HISTORY: usize = file.dimension("N_HISTORY").unwrap().len();
-
-        println!("N_PROF: {}", N_PROF);
-        println!("N_LEVELS: {}", N_LEVELS);
     
         let DATA_TYPE: String = unpack_string("DATA_TYPE", STRING16, [..16].into(), &file);
         let FORMAT_VERSION: String = unpack_string("FORMAT_VERSION", STRING4, [..4].into(), &file);
@@ -368,7 +364,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
+        let mut data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
             .enumerate()
             .map(|(i, param)| {
                 if param.is_empty() || param == "NB_SAMPLE_CTD" {
@@ -415,7 +411,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
-    
+        if let Some(data_info) = &mut data_info {
+            data_info.remove("");
+        }
+
         // let adjusted_level_error: HashMap<String, Vec<f64>> = STATION_PARAMETERS.iter()
         //     .map(|param| {
         //         let adjusted_variable_name = format!("{}_ADJUSTED_ERROR", param);
