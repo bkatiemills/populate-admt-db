@@ -238,17 +238,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             vec![DATA_MODE.clone(); STATION_PARAMETERS.len()]
         };
         
-        // fiddling with templated unpacking, tbd how to consume this downstream
-        // could also turn all these into functions
-
-        let realtime_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
+        let mut realtime_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
             .map(|param| {
                 if param.is_empty() {
                     Ok((param.clone(), vec![]))
                 } else {
                     match file.variable(param) {
                         Some(variable) => {
-                            let data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                            let mut data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                            if let Some(pos) = data.iter().rposition(|&x| x != 99999.0) {
+                                data.truncate(pos + 1);
+                            }
                             Ok((param.clone(), data))
                         },
                         None => Ok((param.clone(), vec![])),
@@ -258,8 +258,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
-    
-        let adjusted_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
+        if let Some(realtime_data) = &mut realtime_data {
+            realtime_data.retain(|_, v| !v.is_empty());
+        }
+
+        let mut adjusted_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
             .enumerate()
             .map(|(i, param)| {
                 if param.is_empty() {
@@ -272,7 +275,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let adjusted_variable_name = format!("{}_ADJUSTED", param);
                         match file.variable(&adjusted_variable_name) {
                             Some(variable) => {
-                                let data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                                let mut data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                                if let Some(pos) = data.iter().rposition(|&x| x != 99999.0) {
+                                    data.truncate(pos + 1);
+                                }
                                 Ok((param.clone(), data))
                             },
                             None => Ok((param.clone(), vec![])),
@@ -283,78 +289,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
+        if let Some(adjusted_data) = &mut adjusted_data {
+            adjusted_data.retain(|_, v| !v.is_empty());
+        }
 
-        let data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
-            .enumerate()
-            .map(|(i, param)| {
-                if param.is_empty() {
-                    Ok((param.clone(), DataInfo {
-                        DATA_MODE: "".to_string(),
-                        UNITS: "".to_string(),
-                        LONG_NAME: "".to_string(),
-                        PROFILE_PARAMETER_QC: "".to_string(),
-                    }))
-                } else {
-                    let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
-                    if data_mode == "R" || param == "NB_SAMPLE_CTD" {
-                        Ok((param.clone(), DataInfo {
-                            DATA_MODE: "".to_string(),
-                            UNITS: "".to_string(),
-                            LONG_NAME: "".to_string(),
-                            PROFILE_PARAMETER_QC: "".to_string(),
-                        }))
-                    } else {
-                        match file.variable(param) {
-                            Some(variable) => {
-                                let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
-                                let units = variable.attribute_value("units").unwrap()?;
-                                let long_name = variable.attribute_value("long_name").unwrap()?;
-                                let qc_variable_name = format!("PROFILE_{}_QC", param);
-                                let qc_value = unpack_string(&qc_variable_name, STRING1, [pfl..(pfl+1)].into(), &file);
-                                if let netcdf::AttributeValue::Str(u) = units {
-                                    if let netcdf::AttributeValue::Str(l) = long_name {
-                                        Ok((param.clone(), DataInfo {
-                                            DATA_MODE: data_mode,
-                                            UNITS: u.to_string(),
-                                            LONG_NAME: l.to_string(),
-                                            PROFILE_PARAMETER_QC: qc_value,
-                                        }))
-                                    } else {
-                                        Err("Could not extract long_name attribute".into())
-                                    }
-                                } else {
-                                    Err("Could not extract units attribute".into())
-                                } 
-                            },
-                            None => Ok((param.clone(), DataInfo {
-                                DATA_MODE: "".to_string(),
-                                UNITS: "".to_string(),
-                                LONG_NAME: "".to_string(),
-                                PROFILE_PARAMETER_QC: "".to_string(),
-                            })),
-                        } 
-                    }
-                }
-            })
-            .collect::<Result<_, Box<dyn Error>>>()
-            .map(Some)
-            .unwrap_or(None);
-    
-        let level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
+        let mut level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
             .map(|param| {
                 if param.is_empty() {
                     Ok((param.clone(), vec![]))
                 } else {
                     let qc_variable_name = format!("{}_QC", param);
-                    let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                    let mut qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                    if let Some(pos) = qc_vec.iter().rposition(|x| x != "") {
+                        qc_vec.truncate(pos + 1);
+                    }
                     Ok((param.clone(), qc_vec))
                 }
             })
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
+        if let Some(level_qc) = &mut level_qc {
+            level_qc.retain(|_, v| !v.is_empty() && !v.iter().all(|x| x == ""));
+        }
             
-        let adjusted_level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
+        let mut adjusted_level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
             .enumerate()
             .map(|(i, param)| {
                 if param.is_empty() {
@@ -365,7 +324,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Ok((param.clone(), vec![]))
                     } else {
                         let qc_variable_name = format!("{}_ADJUSTED_QC", param);
-                        let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                        let mut qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                        if let Some(pos) = qc_vec.iter().rposition(|x| x != "") {
+                            qc_vec.truncate(pos + 1);
+                        }
                         Ok((param.clone(), qc_vec))
                     }
                 }
@@ -373,7 +335,87 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
-            
+        if let Some(adjusted_level_qc) = &mut adjusted_level_qc {
+            adjusted_level_qc.retain(|_, v| !v.is_empty());
+        }
+
+        // make sure we didn't truncate too many fill values
+        // Find the maximum length among all vectors in the HashMaps
+        let max_len = realtime_data.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0))
+        .max(adjusted_data.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)))
+        .max(level_qc.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)))
+        .max(adjusted_level_qc.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)));
+        // Pad vectors in realtime_data and adjusted_data with 99999.0
+        if let Some(realtime_data) = &mut realtime_data {
+            for vec in realtime_data.values_mut() {
+                vec.resize(max_len, 99999.0);
+            }
+        }
+        if let Some(adjusted_data) = &mut adjusted_data {
+            for vec in adjusted_data.values_mut() {
+                vec.resize(max_len, 99999.0);
+            }
+        }
+        // Pad vectors in level_qc and adjusted_level_qc with ""
+        if let Some(level_qc) = &mut level_qc {
+            for vec in level_qc.values_mut() {
+                vec.resize(max_len, "".to_string());
+            }
+        }
+        if let Some(adjusted_level_qc) = &mut adjusted_level_qc {
+            for vec in adjusted_level_qc.values_mut() {
+                vec.resize(max_len, "".to_string());
+            }
+        }
+
+        let data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
+            .enumerate()
+            .map(|(i, param)| {
+                if param.is_empty() || param == "NB_SAMPLE_CTD" {
+                    Ok((param.clone(), DataInfo {
+                        DATA_MODE: "".to_string(),
+                        UNITS: "".to_string(),
+                        LONG_NAME: "".to_string(),
+                        PROFILE_PARAMETER_QC: "".to_string(),
+                    }))
+                } else {
+                    // assumption: if PARAMETER_DATA_MODE exists, it should be used in lieu of DATA_MODE
+                    let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
+                    match file.variable(param) {
+                        Some(variable) => {
+                            //let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
+                            let units = variable.attribute_value("units").unwrap()?;
+                            let long_name = variable.attribute_value("long_name").unwrap()?;
+                            let qc_variable_name = format!("PROFILE_{}_QC", param);
+                            let qc_value = unpack_string(&qc_variable_name, STRING1, [pfl..(pfl+1)].into(), &file);
+                            if let netcdf::AttributeValue::Str(u) = units {
+                                if let netcdf::AttributeValue::Str(l) = long_name {
+                                    Ok((param.clone(), DataInfo {
+                                        DATA_MODE: data_mode,
+                                        UNITS: u.to_string(),
+                                        LONG_NAME: l.to_string(),
+                                        PROFILE_PARAMETER_QC: qc_value,
+                                    }))
+                                } else {
+                                    Err("Could not extract long_name attribute".into())
+                                }
+                            } else {
+                                Err("Could not extract units attribute".into())
+                            } 
+                        },
+                        None => Ok((param.clone(), DataInfo {
+                            DATA_MODE: "".to_string(),
+                            UNITS: "".to_string(),
+                            LONG_NAME: "".to_string(),
+                            PROFILE_PARAMETER_QC: "".to_string(),
+                        })),
+                    }   
+                }
+            })
+            .collect::<Result<_, Box<dyn Error>>>()
+            .map(Some)
+            .unwrap_or(None);
+    
         // let adjusted_level_error: HashMap<String, Vec<f64>> = STATION_PARAMETERS.iter()
         //     .map(|param| {
         //         let adjusted_variable_name = format!("{}_ADJUSTED_ERROR", param);
