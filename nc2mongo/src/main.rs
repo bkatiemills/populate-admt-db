@@ -1,11 +1,7 @@
 use argo_data::VariableExt;
-use std::env;
 
 pub fn main() -> argo_data::error::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let file_path = &args[1];
-
-    let file = netcdf::open(file_path)?;
+    let file = netcdf::open("/home/zellio/repos/bkatiemills/ifremer/aoml/1900167/1900167_prof.nc")?;
 
     let map = file
         .variables()
