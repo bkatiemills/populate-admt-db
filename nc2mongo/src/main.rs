@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         PROFILE_PARAMETER_QC: String,
     } 
 
+    // todo: add timestamp added as a simple versioning mechanism
     #[derive(Serialize, Deserialize, Debug, Clone)]
     struct DataSchema {
         _id: String,
@@ -130,6 +131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let source_file = format!("ftp://ftp.ifremer.fr/ifremer/argo/dac/{}", parts.get(1).unwrap());
 
     // remove previous content from this file
+    // todo: surely there is a better way to do this; at least skip this via env variable when doing full rebuild
     argo.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
 
     // open the file or inform the user the profile has been dropped
