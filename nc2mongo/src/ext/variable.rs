@@ -1,13 +1,21 @@
+// crate in this context is a pointer to ourself,
+// so error:: is the error.rs module in the same directory as lib.rs
 use crate::error::{Error, Result};
 
 pub trait VariableExt {
-    fn try_into_json(&self) -> Result<serde_json::Value>;
+    fn try_into_json(&self) -> Result<serde_json::Value>; // &self is kind of like 'this', it'll refer to the object that's getting the trait implemented on it
 }
 
-impl<'a> VariableExt for netcdf::Variable<'a> {
+impl<'a> VariableExt for netcdf::Variable<'a> { // "lifetime parameters" <'a> tbd, I don't get it
     fn try_into_json(&self) -> Result<serde_json::Value> {
         match self.vartype() {
-            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Byte) => {
+            netcdf::types::VariableType::Basic(netcdf::types::BasicType::Byte) => { // note there are two enums here, VariableType, one variant of which is Basic, which is itself an enum with a bunch of its own variants
+                // get_values requires an argument of type Extents; we use the All variant to get everything
+                // get_values is a generic function, so we need the turbofish to establish some concrete types:
+                // i8 is the type of data we're going to pack into the Vec we return,
+                // and _ is indicating that the type of the Extents is inferred, in this case from the argument to the function.
+                // finally, the .into() is taking the resulting Vec<i8> and trying to coerce it into what we're actually supposed to return, which is a Result<serde_json::Value>
+                // this works since serde_json::Value implements From<Vec<i8>>
                 Ok(self.get_values::<i8, _>(netcdf::Extents::All)?.into())
             }
 
