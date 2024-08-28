@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
           .await?;
     let client = Client::with_options(options)?; 
     let argo = client.database("argo").collection::<DataSchema>("argo");
+    let argo_search = client.database("argo").collection::<DataSchema>("argo_search");
 
     // structs to describe documents //////////////////////////////
 
@@ -126,6 +127,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         source_file: String,
     }
 
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct MapSchema {
+        _id: String,
+        geolocation: GeoJSONPoint,
+        JULD: f64,
+        STATION_PARAMETERS: Vec<String>,
+        source_file: String,
+    }
     // construct link to upstream netcdf file
     let parts: Vec<&str> = filename.split("ifremer/").collect();
     let source_file = format!("ftp://ftp.ifremer.fr/ifremer/argo/dac/{}", parts.get(1).unwrap());
@@ -133,6 +142,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // remove previous content from this file
     // todo: surely there is a better way to do this; at least skip this via env variable when doing full rebuild
     argo.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
+    argo_search.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
 
     // open the file or inform the user the profile has been dropped
     println!("Processing file: {}", filename.clone());
@@ -447,7 +457,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             POSITION_QC: POSITION_QC,
             VERTICAL_SAMPLING_SCHEME: VERTICAL_SAMPLING_SCHEME,
             CONFIG_MISSION_NUMBER: CONFIG_MISSION_NUMBER,
-            STATION_PARAMETERS: STATION_PARAMETERS,
+            STATION_PARAMETERS: STATION_PARAMETERS.clone(),
             realtime_data: realtime_data,
             adjusted_data: adjusted_data,
             data_info: data_info,
@@ -469,9 +479,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             source_file: source_file.clone(),
         };
 
+        let map_object = MapSchema {
+            _id: format!("{}_{}", id, pfl),
+            geolocation: GeoJSONPoint {
+                location_type: "Point".to_string(),
+                coordinates: [LONGITUDE, LATITUDE],
+            },
+            JULD: JULD,
+            STATION_PARAMETERS: STATION_PARAMETERS,
+            source_file: source_file.clone(),
+        };
+
         //println!("{:?}", data_object);
     
-        //argo.insert_one(data_object, None).await?;
+        // insert the structs into the database ////////////////////////////
         let filter = doc! {
             "_id": data_object._id.clone(),
         };
@@ -480,6 +501,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
         let options = mongodb::options::UpdateOptions::builder().upsert(true).build();
         argo.update_one(filter, update, options).await?;
+
+        let map_filter = doc! {
+            "_id": map_object._id.clone(),
+        };
+        let map_update = doc! {
+            "$set": bson::to_bson(&map_object)?,
+        };
+        let map_options = mongodb::options::UpdateOptions::builder().upsert(true).build();
+        argo_search.update_one(map_filter, map_update, map_options).await?;
     }
     
     Ok(())
