@@ -13,7 +13,7 @@ spec:
   - name: admt-rebuild
     imagePullPolicy: Always
     image: argovis/admtupdates:rebuild
-    command: ['sleep', '10000000']
+    command: ['sleep', '10000000']  
     env:
     - name: MONGODB_URI
       value: mongodb://database-admt/argo
@@ -25,7 +25,7 @@ spec:
         memory: "0Gi"
         cpu: "0m"
       limits:
-        memory: 6000Mi
-        cpu: 3000m
+        memory: 4000Mi
+        cpu: 2000m
   restartPolicy: Never
 

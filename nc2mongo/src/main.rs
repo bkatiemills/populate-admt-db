@@ -4,11 +4,9 @@ use tokio;
 use std::error::Error;
 use std::env;
 use mongodb::bson::{doc};
-use mongodb::{Client, options::{ClientOptions, ResolverConfig, DeleteOptions}};
+use mongodb::{Client, options::{ClientOptions, ResolverConfig}};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use futures::StreamExt;
 
 // helper functions ///////////////////////////////////////////
 
@@ -55,8 +53,8 @@ fn split_string(input: String, separator: char) -> Vec<String> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     
-    // Read the command line argument as data_directory
-    let data_directory = std::env::args().nth(1).expect("Missing data directory argument");
+    // Read the command line argument as file name of interest
+    let filename = std::env::args().nth(1).expect("Missing data directory argument");
 
     // mongodb setup ///////////////////////////////////////////
     // Load the MongoDB connection string from an environment variable:
@@ -70,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
           .await?;
     let client = Client::with_options(options)?; 
     let argo = client.database("argo").collection::<DataSchema>("argo");
-    let argo_meta = client.database("argo").collection::<MetaSchema>("argoMeta");
+    let argo_search = client.database("argo").collection::<DataSchema>("argo_search");
 
     // structs to describe documents //////////////////////////////
 
@@ -89,11 +87,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         PROFILE_PARAMETER_QC: String,
     } 
 
+    // todo: add timestamp added as a simple versioning mechanism
     #[derive(Serialize, Deserialize, Debug, Clone)]
     struct DataSchema {
         _id: String,
         geolocation: GeoJSONPoint,
-        metadata: Vec<String>,
         CYCLE_NUMBER: i32,
         DIRECTION: String,
         DATA_STATE_INDICATOR: String,
@@ -113,11 +111,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         data_info: Option<HashMap<String, DataInfo>>,
         level_qc: Option<HashMap<String, Vec<String>>>,
         adjusted_level_qc: Option<HashMap<String, Vec<String>>>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct MetaSchema {
-        _id: String,
         DATA_TYPE: String,
         FORMAT_VERSION: String,
         HANDBOOK_VERSION: String,
@@ -131,58 +124,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
         FIRMWARE_VERSION: String,
         WMO_INST_TYPE: String,
         POSITIONING_SYSTEM: String,
+        source_file: String,
     }
 
-    // data unpacking /////////////////////////////////////////////
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct MapSchema {
+        _id: String,
+        geolocation: GeoJSONPoint,
+        JULD: f64,
+        STATION_PARAMETERS: Vec<String>,
+        source_file: String,
+    }
+    // construct link to upstream netcdf file
+    let parts: Vec<&str> = filename.split("ifremer/").collect();
+    let source_file = format!("ftp://ftp.ifremer.fr/ifremer/argo/dac/{}", parts.get(1).unwrap());
 
-    // // get a list of all the files in the data directory
-    // let mut file_names: Vec<String> = Vec::new();
-    // if let Ok(entries) = fs::read_dir(data_directory.clone()) {
-    //     for entry in entries {
-    //         if let Ok(entry) = entry {
-    //             if let Some(file_name) = entry.file_name().to_str() {
-    //                 let profile_path = format!("{}/{}/profiles", data_directory, file_name);
-    //                 if let Ok(profile_entries) = fs::read_dir(profile_path.clone()) {
-    //                     for profile_entry in profile_entries {
-    //                         if let Ok(profile_entry) = profile_entry {
-    //                             if let Some(profile_file_name) = profile_entry.file_name().to_str() {
-    //                                 let file_path = format!("{}/{}/profiles/{}", data_directory, file_name, profile_file_name);
-    //                                 file_names.push(file_path);
-    //                             }
-    //                         }
-    //                     }
-    //                 }   
-    //             }
-    //         }
-    //     }
-    // }
+    // remove previous content from this file
+    // todo: surely there is a better way to do this; at least skip this via env variable when doing full rebuild
+    argo.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
+    argo_search.delete_many(doc! { "source_file": source_file.clone() }, None).await?;
 
-    // use 'data_directory' as the file name for now
-    let mut file_names: Vec<String> = Vec::new();
-    file_names.push(data_directory.clone());
-    
-    for file_name in file_names {
-        println!("Processing file: {}", file_name);
-        let id = file_name
-            .rsplit('/')
-            .next()
-            .and_then(|name| name.strip_suffix(".nc"))
-            .unwrap_or("");
-        let file = match netcdf::open(&file_name) {
-            Ok(file) => file,
-            Err(e) => {
-                let delete_id = file_name
-                    .rsplit('/')
-                    .next()
-                    .and_then(|name| name.strip_suffix(".nc"))
-                    .unwrap_or("");
-                println!("Deleting profile: {}", delete_id); 
-                let filter = doc! { "_id": delete_id };
-                let options = DeleteOptions::builder().build();
-                argo.delete_one(filter, options).await?;
-                continue;
-            }
-        };
+    // open the file or inform the user the profile has been dropped
+    println!("Processing file: {}", filename.clone());
+    let id = filename
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".nc"))
+        .unwrap_or("");
+    let file = match netcdf::open(&filename.clone()) {
+        Ok(file) => file,
+        Err(_e) => {
+            eprintln!("Deleted contents of file: {}", source_file);
+            std::process::exit(1);
+        }
+    };
+
+    // loop over internal profiles
+    let N_PROF: usize = file.dimension("N_PROF").unwrap().len();
+    for pfl in 0..N_PROF {
+
+        // data unpacking /////////////////////////////////////////////
         let pindex = 0; // just use the first profile for now
         let STRING1: usize = 1;
         let STRING2: usize = 2;
@@ -193,10 +174,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let STRING64: usize = 64;
         let STRING256: usize = 256;
         let DATE_TIME: usize = 14;
-        let N_PROF: usize = file.dimension("N_PROF").unwrap().len();
+        
         let N_PARAM: usize = file.dimension("N_PARAM").unwrap().len();
         let N_LEVELS: usize = file.dimension("N_LEVELS").unwrap().len();
-        let N_CALIB: usize = file.dimension("N_CALIB").unwrap().len();
+        //let N_CALIB: usize = file.dimension("N_CALIB").unwrap().len();
         //let N_HISTORY: usize = file.dimension("N_HISTORY").unwrap().len();
     
         let DATA_TYPE: String = unpack_string("DATA_TYPE", STRING16, [..16].into(), &file);
@@ -205,9 +186,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let REFERENCE_DATE_TIME: String = unpack_string("REFERENCE_DATE_TIME", DATE_TIME, [..14].into(), &file);
         let DATE_CREATION: String = unpack_string("DATE_CREATION", DATE_TIME, [..14].into(), &file);
         let DATE_UPDATE: String = unpack_string("DATE_UPDATE", DATE_TIME, [..14].into(), &file);
-        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [..1, ..8].into(), &file); // encoded as metadata _id
-        let PROJECT_NAME: String = unpack_string("PROJECT_NAME", STRING64, [..1, ..64].into(), &file);
-        let PI_NAME: String = unpack_string("PI_NAME", STRING64, [..1, ..64].into(), &file);
+        let PLATFORM_NUMBER: String = unpack_string("PLATFORM_NUMBER", STRING8, [pfl..(pfl+1), 0..8].into(), &file);
+        let PROJECT_NAME: String = unpack_string("PROJECT_NAME", STRING64, [pfl..(pfl+1), 0..64].into(), &file);
+        let PI_NAME: String = unpack_string("PI_NAME", STRING64, [pfl..(pfl+1), 0..64].into(), &file);
         let namesize: usize = file.variable("STATION_PARAMETERS").unwrap().dimensions()[2].len();
         let STATION_PARAMETERS: Vec<String> = unpack_string_array(
             "STATION_PARAMETERS",
@@ -223,21 +204,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 _ => panic!("Unsupported namesize: {}", namesize),
             },
             N_PARAM,
-            [..1, ..N_PARAM, ..namesize].into(),
+            [pfl..(pfl+1), 0..N_PARAM, 0..namesize].into(),
             &file,
         );
         let CYCLE_NUMBER: i32 = file.variable("CYCLE_NUMBER").map(|var| var.get_value([pindex]).unwrap_or(99999)).unwrap_or(99999);
-        let DIRECTION: String = unpack_string("DIRECTION", STRING1, [..1].into(), &file);
-        let DATA_CENTRE: String = unpack_string("DATA_CENTRE", STRING2, [..1, ..2].into(), &file);
-        let DC_REFERENCE: String = unpack_string("DC_REFERENCE", STRING32, [..1, ..32].into(), &file);
-        let DATA_STATE_INDICATOR: String = unpack_string("DATA_STATE_INDICATOR", STRING4, [..1, ..4].into(), &file);
-        let DATA_MODE: String = unpack_string("DATA_MODE", STRING1, [..1].into(), &file);
-        let PLATFORM_TYPE: String = unpack_string("PLATFORM_TYPE", STRING32, [..1, ..32].into(), &file);
-        let FLOAT_SERIAL_NO: String = unpack_string("FLOAT_SERIAL_NO", STRING32, [..1, ..32].into(), &file);
-        let FIRMWARE_VERSION: String = unpack_string("FIRMWARE_VERSION", STRING32, [..1, ..32].into(), &file);
-        let WMO_INST_TYPE: String = unpack_string("WMO_INST_TYPE", STRING4, [..1, ..4].into(), &file);
+        let DIRECTION: String = unpack_string("DIRECTION", STRING1, [pfl..(pfl+1)].into(), &file);
+        let DATA_CENTRE: String = unpack_string("DATA_CENTRE", STRING2, [pfl..(pfl+1), 0..2].into(), &file);
+        let DC_REFERENCE: String = unpack_string("DC_REFERENCE", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let DATA_STATE_INDICATOR: String = unpack_string("DATA_STATE_INDICATOR", STRING4, [pfl..(pfl+1), 0..4].into(), &file);
+        let DATA_MODE: String = unpack_string("DATA_MODE", STRING1, [pfl..(pfl+1)].into(), &file);
+        let PLATFORM_TYPE: String = unpack_string("PLATFORM_TYPE", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let FLOAT_SERIAL_NO: String = unpack_string("FLOAT_SERIAL_NO", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let FIRMWARE_VERSION: String = unpack_string("FIRMWARE_VERSION", STRING32, [pfl..(pfl+1), 0..32].into(), &file);
+        let WMO_INST_TYPE: String = unpack_string("WMO_INST_TYPE", STRING4, [pfl..(pfl+1), 0..4].into(), &file);
         let JULD: f64 = file.variable("JULD").map(|var| var.get_value([pindex]).unwrap_or(999999.0)).unwrap_or(999999.0);
-        let JULD_QC: String = unpack_string("JULD_QC", STRING1, [..1].into(), &file);
+        let JULD_QC: String = unpack_string("JULD_QC", STRING1, [pfl..(pfl+1)].into(), &file);
         let JULD_LOCATION: f64 = file.variable("JULD_LOCATION").map(|var| var.get_value([pindex]).unwrap_or(999999.0)).unwrap_or(999999.0);
         let mut LATITUDE: f64 = file.variable("LATITUDE").map(|var| var.get_value([pindex]).unwrap_or(99999.0)).unwrap_or(99999.0);
         let mut LONGITUDE: f64 = file.variable("LONGITUDE").map(|var| var.get_value([pindex]).unwrap_or(99999.0)).unwrap_or(99999.0);
@@ -254,28 +235,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             LONGITUDE
         };
-        let POSITION_QC: String = unpack_string("POSITION_QC", STRING1, [..1].into(), &file);
-        let POSITIONING_SYSTEM: String = unpack_string("POSITIONING_SYSTEM", STRING8, [..1, ..8].into(), &file);
-        let VERTICAL_SAMPLING_SCHEME: String = unpack_string("VERTICAL_SAMPLING_SCHEME", STRING256, [..1, ..256].into(), &file);
+        let POSITION_QC: String = unpack_string("POSITION_QC", STRING1, [pfl..(pfl+1)].into(), &file);
+        let POSITIONING_SYSTEM: String = unpack_string("POSITIONING_SYSTEM", STRING8, [pfl..(pfl+1), 0..8].into(), &file);
+        let VERTICAL_SAMPLING_SCHEME: String = unpack_string("VERTICAL_SAMPLING_SCHEME", STRING256, [pfl..(pfl+1), 0..256].into(), &file);
         let CONFIG_MISSION_NUMBER: i32 = file.variable("CONFIG_MISSION_NUMBER").map(|var| var.get_value([pindex]).unwrap_or(99999)).unwrap_or(99999);
 
-        let PARAMETER_DATA_MODE: Vec<String> = if let Some(variable) = file.variable("PARAMETER_DATA_MODE") {
-            unpack_string_array("PARAMETER_DATA_MODE", STRING1, N_PARAM, [..1, ..N_PARAM].into(), &file)
+        let PARAMETER_DATA_MODE: Vec<String> = if let Some(_variable) = file.variable("PARAMETER_DATA_MODE") {
+            unpack_string_array("PARAMETER_DATA_MODE", STRING1, N_PARAM, [pfl..(pfl+1), 0..N_PARAM].into(), &file)
         } else {
             vec![DATA_MODE.clone(); STATION_PARAMETERS.len()]
         };
         
-        // fiddling with templated unpacking, tbd how to consume this downstream
-        // could also turn all these into functions
-
-        let realtime_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
+        let mut realtime_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
             .map(|param| {
                 if param.is_empty() {
                     Ok((param.clone(), vec![]))
                 } else {
                     match file.variable(param) {
                         Some(variable) => {
-                            let data: Vec<f64> = variable.get_values([..1, ..N_LEVELS])?;
+                            let mut data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                            if let Some(pos) = data.iter().rposition(|&x| x != 99999.0) {
+                                data.truncate(pos + 1);
+                            }
                             Ok((param.clone(), data))
                         },
                         None => Ok((param.clone(), vec![])),
@@ -285,8 +266,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
-    
-        let adjusted_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
+        if let Some(realtime_data) = &mut realtime_data {
+            realtime_data.retain(|_, v| !v.is_empty());
+        }
+
+        let mut adjusted_data: Option<HashMap<String, Vec<f64>>> = STATION_PARAMETERS.iter()
             .enumerate()
             .map(|(i, param)| {
                 if param.is_empty() {
@@ -299,7 +283,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let adjusted_variable_name = format!("{}_ADJUSTED", param);
                         match file.variable(&adjusted_variable_name) {
                             Some(variable) => {
-                                let data: Vec<f64> = variable.get_values([..1, ..N_LEVELS])?;
+                                let mut data: Vec<f64> = variable.get_values([pfl..(pfl+1), 0..N_LEVELS])?;
+                                if let Some(pos) = data.iter().rposition(|&x| x != 99999.0) {
+                                    data.truncate(pos + 1);
+                                }
                                 Ok((param.clone(), data))
                             },
                             None => Ok((param.clone(), vec![])),
@@ -310,78 +297,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
+        if let Some(adjusted_data) = &mut adjusted_data {
+            adjusted_data.retain(|_, v| !v.is_empty());
+        }
 
-        let data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
-            .enumerate()
-            .map(|(i, param)| {
-                if param.is_empty() {
-                    Ok((param.clone(), DataInfo {
-                        DATA_MODE: "".to_string(),
-                        UNITS: "".to_string(),
-                        LONG_NAME: "".to_string(),
-                        PROFILE_PARAMETER_QC: "".to_string(),
-                    }))
-                } else {
-                    let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
-                    if data_mode == "R" || param == "NB_SAMPLE_CTD" {
-                        Ok((param.clone(), DataInfo {
-                            DATA_MODE: "".to_string(),
-                            UNITS: "".to_string(),
-                            LONG_NAME: "".to_string(),
-                            PROFILE_PARAMETER_QC: "".to_string(),
-                        }))
-                    } else {
-                        match file.variable(param) {
-                            Some(variable) => {
-                                let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
-                                let units = variable.attribute_value("units").unwrap()?;
-                                let long_name = variable.attribute_value("long_name").unwrap()?;
-                                let qc_variable_name = format!("PROFILE_{}_QC", param);
-                                let qc_value = unpack_string(&qc_variable_name, STRING1, [..1].into(), &file);
-                                if let netcdf::AttributeValue::Str(u) = units {
-                                    if let netcdf::AttributeValue::Str(l) = long_name {
-                                        Ok((param.clone(), DataInfo {
-                                            DATA_MODE: data_mode,
-                                            UNITS: u.to_string(),
-                                            LONG_NAME: l.to_string(),
-                                            PROFILE_PARAMETER_QC: qc_value,
-                                        }))
-                                    } else {
-                                        Err("Could not extract long_name attribute".into())
-                                    }
-                                } else {
-                                    Err("Could not extract units attribute".into())
-                                } 
-                            },
-                            None => Ok((param.clone(), DataInfo {
-                                DATA_MODE: "".to_string(),
-                                UNITS: "".to_string(),
-                                LONG_NAME: "".to_string(),
-                                PROFILE_PARAMETER_QC: "".to_string(),
-                            })),
-                        } 
-                    }
-                }
-            })
-            .collect::<Result<_, Box<dyn Error>>>()
-            .map(Some)
-            .unwrap_or(None);
-    
-        let level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
+        let mut level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
             .map(|param| {
                 if param.is_empty() {
                     Ok((param.clone(), vec![]))
                 } else {
                     let qc_variable_name = format!("{}_QC", param);
-                    let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [..1, ..N_LEVELS].into(), &file);
+                    let mut qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                    if let Some(pos) = qc_vec.iter().rposition(|x| x != "") {
+                        qc_vec.truncate(pos + 1);
+                    }
                     Ok((param.clone(), qc_vec))
                 }
             })
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
+        if let Some(level_qc) = &mut level_qc {
+            level_qc.retain(|_, v| !v.is_empty() && !v.iter().all(|x| x == ""));
+        }
             
-        let adjusted_level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
+        let mut adjusted_level_qc: Option<HashMap<String, Vec<String>>> = STATION_PARAMETERS.iter()
             .enumerate()
             .map(|(i, param)| {
                 if param.is_empty() {
@@ -392,7 +332,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Ok((param.clone(), vec![]))
                     } else {
                         let qc_variable_name = format!("{}_ADJUSTED_QC", param);
-                        let qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [..1, ..N_LEVELS].into(), &file);
+                        let mut qc_vec = unpack_string_array(&qc_variable_name, STRING1, N_LEVELS, [pfl..(pfl+1), 0..N_LEVELS].into(), &file);
+                        if let Some(pos) = qc_vec.iter().rposition(|x| x != "") {
+                            qc_vec.truncate(pos + 1);
+                        }
                         Ok((param.clone(), qc_vec))
                     }
                 }
@@ -400,7 +343,90 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Result<_, Box<dyn Error>>>()
             .map(Some)
             .unwrap_or(None);
-            
+        if let Some(adjusted_level_qc) = &mut adjusted_level_qc {
+            adjusted_level_qc.retain(|_, v| !v.is_empty());
+        }
+
+        // make sure we didn't truncate too many fill values
+        // Find the maximum length among all vectors in the HashMaps
+        let max_len = realtime_data.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0))
+        .max(adjusted_data.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)))
+        .max(level_qc.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)))
+        .max(adjusted_level_qc.as_ref().map_or(0, |m| m.values().map(|v| v.len()).max().unwrap_or(0)));
+        // Pad vectors in realtime_data and adjusted_data with 99999.0
+        if let Some(realtime_data) = &mut realtime_data {
+            for vec in realtime_data.values_mut() {
+                vec.resize(max_len, 99999.0);
+            }
+        }
+        if let Some(adjusted_data) = &mut adjusted_data {
+            for vec in adjusted_data.values_mut() {
+                vec.resize(max_len, 99999.0);
+            }
+        }
+        // Pad vectors in level_qc and adjusted_level_qc with ""
+        if let Some(level_qc) = &mut level_qc {
+            for vec in level_qc.values_mut() {
+                vec.resize(max_len, "".to_string());
+            }
+        }
+        if let Some(adjusted_level_qc) = &mut adjusted_level_qc {
+            for vec in adjusted_level_qc.values_mut() {
+                vec.resize(max_len, "".to_string());
+            }
+        }
+
+        let mut data_info: Option<HashMap<String, DataInfo>> = STATION_PARAMETERS.iter()
+            .enumerate()
+            .map(|(i, param)| {
+                if param.is_empty() || param == "NB_SAMPLE_CTD" {
+                    Ok((param.clone(), DataInfo {
+                        DATA_MODE: "".to_string(),
+                        UNITS: "".to_string(),
+                        LONG_NAME: "".to_string(),
+                        PROFILE_PARAMETER_QC: "".to_string(),
+                    }))
+                } else {
+                    // assumption: if PARAMETER_DATA_MODE exists, it should be used in lieu of DATA_MODE
+                    let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
+                    match file.variable(param) {
+                        Some(variable) => {
+                            //let data_mode = PARAMETER_DATA_MODE.get(i).cloned().unwrap_or(DATA_MODE.clone());
+                            let units = variable.attribute_value("units").unwrap()?;
+                            let long_name = variable.attribute_value("long_name").unwrap()?;
+                            let qc_variable_name = format!("PROFILE_{}_QC", param);
+                            let qc_value = unpack_string(&qc_variable_name, STRING1, [pfl..(pfl+1)].into(), &file);
+                            if let netcdf::AttributeValue::Str(u) = units {
+                                if let netcdf::AttributeValue::Str(l) = long_name {
+                                    Ok((param.clone(), DataInfo {
+                                        DATA_MODE: data_mode,
+                                        UNITS: u.to_string(),
+                                        LONG_NAME: l.to_string(),
+                                        PROFILE_PARAMETER_QC: qc_value,
+                                    }))
+                                } else {
+                                    Err("Could not extract long_name attribute".into())
+                                }
+                            } else {
+                                Err("Could not extract units attribute".into())
+                            } 
+                        },
+                        None => Ok((param.clone(), DataInfo {
+                            DATA_MODE: "".to_string(),
+                            UNITS: "".to_string(),
+                            LONG_NAME: "".to_string(),
+                            PROFILE_PARAMETER_QC: "".to_string(),
+                        })),
+                    }   
+                }
+            })
+            .collect::<Result<_, Box<dyn Error>>>()
+            .map(Some)
+            .unwrap_or(None);
+        if let Some(data_info) = &mut data_info {
+            data_info.remove("");
+        }
+
         // let adjusted_level_error: HashMap<String, Vec<f64>> = STATION_PARAMETERS.iter()
         //     .map(|param| {
         //         let adjusted_variable_name = format!("{}_ADJUSTED_ERROR", param);
@@ -412,72 +438,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         
         // construct the structs for this file ///////////////////////////////
     
-        let mut meta_object = MetaSchema {
-            _id: PLATFORM_NUMBER.clone(),
-            DATA_TYPE: DATA_TYPE,
-            FORMAT_VERSION: FORMAT_VERSION,
-            HANDBOOK_VERSION: HANDBOOK_VERSION,
-            REFERENCE_DATE_TIME: REFERENCE_DATE_TIME,
-            PROJECT_NAME: PROJECT_NAME,
-            PI_NAME: split_string(PI_NAME, ','),
-            DATA_CENTRE: DATA_CENTRE,
-            PLATFORM_TYPE: PLATFORM_TYPE,
-            PLATFORM_NUMBER: PLATFORM_NUMBER.clone(),
-            FLOAT_SERIAL_NO: FLOAT_SERIAL_NO,
-            FIRMWARE_VERSION: FIRMWARE_VERSION,
-            WMO_INST_TYPE: WMO_INST_TYPE,
-            POSITIONING_SYSTEM: POSITIONING_SYSTEM,
-        };
-
-        // check if this metadata object already exists in the database
-        let filter = doc! {
-            "PLATFORM_NUMBER": meta_object.PLATFORM_NUMBER.clone(),
-        };
-        let mut cursor = argo_meta.find(filter, None).await?;
-
-        let mut meta_id = String::new();
-        let mut metadocs = 0;
-        while let Some(result) = cursor.next().await {
-            match result {
-                Ok(document) => {
-                    if document.DATA_TYPE == meta_object.DATA_TYPE
-                        && document.FORMAT_VERSION == meta_object.FORMAT_VERSION
-                        && document.HANDBOOK_VERSION == meta_object.HANDBOOK_VERSION
-                        && document.REFERENCE_DATE_TIME == meta_object.REFERENCE_DATE_TIME
-                        && document.PROJECT_NAME == meta_object.PROJECT_NAME
-                        && document.PI_NAME == meta_object.PI_NAME
-                        && document.DATA_CENTRE == meta_object.DATA_CENTRE
-                        && document.PLATFORM_TYPE == meta_object.PLATFORM_TYPE
-                        && document.PLATFORM_NUMBER == meta_object.PLATFORM_NUMBER
-                        && document.FLOAT_SERIAL_NO == meta_object.FLOAT_SERIAL_NO
-                        && document.FIRMWARE_VERSION == meta_object.FIRMWARE_VERSION
-                        && document.WMO_INST_TYPE == meta_object.WMO_INST_TYPE
-                        && document.POSITIONING_SYSTEM == meta_object.POSITIONING_SYSTEM
-                    {
-                        meta_id = document._id.clone();
-                    } else {
-                        metadocs += 1;
-                    }
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        if meta_id.is_empty() {
-            // we found a new metadata doc
-            let new_id = format!("{}_m{}", PLATFORM_NUMBER, metadocs);
-            meta_object._id = new_id.clone();
-            argo_meta.insert_one(meta_object, None).await?;
-            meta_id = new_id;
-        }
-
         let data_object = DataSchema {
-            _id: id.to_string(),
+            _id: format!("{}_{}", id, pfl),
             geolocation: GeoJSONPoint {
                 location_type: "Point".to_string(),
                 coordinates: [LONGITUDE, LATITUDE],
             },
-            metadata: vec![meta_id.clone()],
             CYCLE_NUMBER: CYCLE_NUMBER,
             DIRECTION: DIRECTION,
             DATA_STATE_INDICATOR: DATA_STATE_INDICATOR,
@@ -491,15 +457,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
             POSITION_QC: POSITION_QC,
             VERTICAL_SAMPLING_SCHEME: VERTICAL_SAMPLING_SCHEME,
             CONFIG_MISSION_NUMBER: CONFIG_MISSION_NUMBER,
-            STATION_PARAMETERS: STATION_PARAMETERS,
+            STATION_PARAMETERS: STATION_PARAMETERS.clone(),
             realtime_data: realtime_data,
             adjusted_data: adjusted_data,
             data_info: data_info,
             level_qc: level_qc,
             adjusted_level_qc: adjusted_level_qc,
+            DATA_TYPE: DATA_TYPE,
+            FORMAT_VERSION: FORMAT_VERSION,
+            HANDBOOK_VERSION: HANDBOOK_VERSION,
+            REFERENCE_DATE_TIME: REFERENCE_DATE_TIME,
+            PROJECT_NAME: PROJECT_NAME,
+            PI_NAME: split_string(PI_NAME, ','),
+            DATA_CENTRE: DATA_CENTRE,
+            PLATFORM_TYPE: PLATFORM_TYPE,
+            PLATFORM_NUMBER: PLATFORM_NUMBER,
+            FLOAT_SERIAL_NO: FLOAT_SERIAL_NO,
+            FIRMWARE_VERSION: FIRMWARE_VERSION,
+            WMO_INST_TYPE: WMO_INST_TYPE,
+            POSITIONING_SYSTEM: POSITIONING_SYSTEM,
+            source_file: source_file.clone(),
         };
+
+        let map_object = MapSchema {
+            _id: format!("{}_{}", id, pfl),
+            geolocation: GeoJSONPoint {
+                location_type: "Point".to_string(),
+                coordinates: [LONGITUDE, LATITUDE],
+            },
+            JULD: JULD,
+            STATION_PARAMETERS: STATION_PARAMETERS,
+            source_file: source_file.clone(),
+        };
+
+        //println!("{:?}", data_object);
     
-        //argo.insert_one(data_object, None).await?;
+        // insert the structs into the database ////////////////////////////
         let filter = doc! {
             "_id": data_object._id.clone(),
         };
@@ -508,6 +501,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
         let options = mongodb::options::UpdateOptions::builder().upsert(true).build();
         argo.update_one(filter, update, options).await?;
+
+        let map_filter = doc! {
+            "_id": map_object._id.clone(),
+        };
+        let map_update = doc! {
+            "$set": bson::to_bson(&map_object)?,
+        };
+        let map_options = mongodb::options::UpdateOptions::builder().upsert(true).build();
+        argo_search.update_one(map_filter, map_update, map_options).await?;
     }
     
     Ok(())
